@@ -849,6 +849,7 @@ Make sure you credit whoever drew it if it wasn't you!
         var customTexts = 0;
         var screenFactor = 1;
         var defaultColor = "#ffffff";
+        var layoutFrames = {}; //The box each overlay item's coordinates came from, so a resize can rescale them.
 
         /*const rgbToHex = (r, g, b) => {
             const toHex = (value) => value.toString(16).padStart(2, '0');
@@ -965,6 +966,7 @@ Make sure you credit whoever drew it if it wasn't you!
                 type: "text",
                 group: group
             }
+            layoutFrames[id] = document.getElementById("sidePanel").getBoundingClientRect();
             updateTextBox(id);
         }
 
@@ -1070,6 +1072,13 @@ Make sure you credit whoever drew it if it wasn't you!
 
         function resetSVG() {
             positionHandles(currentTab);
+            for(let id in rulers) {
+                if(rulers[id].group.closest(".overlay").id != currentTab + "Overlay") {
+                    continue;
+                }
+                //positionHandles just re-derived this tab's items from the sidebar, so that is the box to measure against.
+                layoutFrames[id] = document.getElementById("sidePanel").getBoundingClientRect();
+            }
         }
 
         function positionLineStupid(line, x1, y1) {
@@ -1214,12 +1223,24 @@ Make sure you credit whoever drew it if it wasn't you!
 
         function positionScreen() {
             //Shrinks all of the displayed elements if the sidebar can't fit vertically (which requires a height of 700px.)
-            let box = document.getElementById("standardElements").getBoundingClientRect();
-            if(box.height < 750) {
+            let standard = document.getElementById("standardElements");
+            //Undo the previous pass first so calling this again doesn't stack scales on top of each other.
+            screenFactor = 1;
+            standard.style.transform = "none";
+            standard.style.width = "100%";
+            standard.style.height = "100%";
+            for(let element of document.getElementsByClassName("overlay")) {
+                element.style.transform = "none";
+                element.style.width = "100%";
+                element.style.height = "100%";
+            }
+
+            let box = standard.getBoundingClientRect();
+            if(box.height > 0 && box.height < 750) {
                 screenFactor = box.height / 750;
-                document.getElementById("standardElements").style.transform = "scale(" + screenFactor + ")";
-                document.getElementById("standardElements").style.width = 100 / screenFactor + "%";
-                document.getElementById("standardElements").style.height = 100 / screenFactor + "%";
+                standard.style.transform = "scale(" + screenFactor + ")";
+                standard.style.width = 100 / screenFactor + "%";
+                standard.style.height = 100 / screenFactor + "%";
                 for(let element of document.getElementsByClassName("overlay")) {
                     element.style.transform = "scale(" + screenFactor + ")";
                     element.style.width = 100 / screenFactor + "%";
@@ -1228,6 +1249,62 @@ Make sure you credit whoever drew it if it wasn't you!
 
             }
 
+        }
+
+        //The measurement lines and their length labels belong to the photo, everything else belongs to the sidebar.
+        const photoItems = ["reference", "dim1", "dim2", "dim3", "referenceText", "dim1Text", "dim2Text", "dim3Text"];
+
+        function anchorFor(id) {
+            let box = (photoItems.includes(id)) ? document.getElementById("tittyImage").getBoundingClientRect() : undefined;
+            if(box == undefined || box.width < 1 || box.height < 1) {
+                //No photo on screen yet, so fall back to the box the startup layout is measured against.
+                box = document.getElementById("sidePanel").getBoundingClientRect();
+            }
+            return box;
+        }
+
+        function relayout() {
+            let saved = {};
+            for(let id in rulers) {
+                //The layout has already changed by the time a resize arrives, so the ratios have to come from the box
+                //the coordinates were last measured against rather than from wherever that box is now.
+                let box = layoutFrames[id] || anchorFor(id);
+                if(box.width < 1 || box.height < 1) {
+                    return;
+                }
+                saved[id] = [
+                    (rulers[id].x1 - box.x) / box.width, (rulers[id].y1 - box.y) / box.height,
+                    (rulers[id].x2 - box.x) / box.width, (rulers[id].y2 - box.y) / box.height,
+                ];
+            }
+
+            positionScreen();
+            for(let tab of ["dimensions", "volume", "clothing", "milk", "customize", "export", "me"]) {
+                positionHandles(tab); //Repeats the startup layout, which also rewrites each overlay's viewBox for the new window size.
+            }
+
+            for(let id in rulers) {
+                let box = anchorFor(id);
+                if(box.width < 1 || box.height < 1) {
+                    return;
+                }
+                layoutFrames[id] = box;
+                let line = rulers[id];
+                line.x1 = box.x + saved[id][0] * box.width;
+                line.y1 = box.y + saved[id][1] * box.height;
+                if(line.type == "text") {
+                    //Text keeps its own size, so only the left edge is restored.
+                    line.y2 = line.y1;
+                    line.x2 = line.x1 + line.group.children[0].width.baseVal.value * screenFactor;
+                    updateLine(line);
+                    updateTextBox(id);
+                } else {
+                    line.x2 = box.x + saved[id][2] * box.width;
+                    line.y2 = box.y + saved[id][3] * box.height;
+                    updateLine(line);
+                }
+            }
+            updateTexts();
         }
 
         function updateLine(line) {
@@ -1303,6 +1380,9 @@ Make sure you credit whoever drew it if it wasn't you!
         positionHandles("milk");
         positionHandles("export");
         positionHandles("me");
+        for(let id in rulers) {
+            layoutFrames[id] = anchorFor(id); //Remember the boxes these startup positions came from.
+        }
 
         let currentlyGrabbed = undefined;
         let grabbedNumber = 1;
@@ -1606,6 +1686,19 @@ Make sure you credit whoever drew it if it wasn't you!
             currentlyGrabbed = undefined;
         })
 
+        let relayoutScheduled = false;
+        window.addEventListener('resize', function(event) {
+            //Resizing fires constantly while the window is dragged, so only relayout once per frame.
+            if(relayoutScheduled) {
+                return;
+            }
+            relayoutScheduled = true;
+            requestAnimationFrame(function() {
+                relayoutScheduled = false;
+                relayout();
+            });
+        });
+
         window.addEventListener('mousemove', function(event) {
             let delta = {
                 x: mousePos.x - event.clientX,
@@ -1661,9 +1754,12 @@ Make sure you credit whoever drew it if it wasn't you!
         }
 
         function imageLoaded(src) {
-            document.getElementById("tittyImage").src = src;
+            let image = document.getElementById("tittyImage");
+            image.src = src;
             document.getElementById("waitingForImage").style.display = "none";
-            document.getElementById("tittyImage").style.display = "block";
+            image.style.display = "block";
+            //The photo's size is what the overlay is measured against, so wait for it and then re-anchor everything to it.
+            image.addEventListener('load', relayout, {once: true});
             //takeScreenshot();
         }
 
